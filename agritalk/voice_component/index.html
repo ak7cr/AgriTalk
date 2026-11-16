@@ -1,0 +1,115 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <style>
+    * { box-sizing: border-box; }
+    body { margin: 0; font: 14px system-ui, sans-serif; color: #17251c; }
+    .wrap { display: flex; align-items: center; gap: 14px; min-height: 72px; padding: 10px 0; }
+    button { border: 0; border-radius: 9px; background: #176b45; color: white; cursor: pointer; font: 600 14px system-ui, sans-serif; padding: 11px 16px; white-space: nowrap; }
+    button:hover { background: #105638; }
+    button:focus-visible { outline: 3px solid #80cba4; outline-offset: 2px; }
+    button[disabled] { opacity: .65; cursor: wait; }
+    .viz { height: 48px; flex: 1; min-width: 80px; border-radius: 10px; background: #f1f6f2; }
+    .status { min-width: 96px; color: #526158; font-size: 12px; }
+    .live { color: #b42318; font-weight: 650; }
+    @media (max-width: 480px) { .wrap { flex-wrap: wrap; } .viz { flex-basis: 100%; order: 3; } .status { margin-left: auto; } }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <button id="toggle" type="button"></button>
+    <canvas class="viz" id="visualizer" aria-label="Live audio recording visualizer"></canvas>
+    <span class="status" id="status" aria-live="polite"></span>
+  </div>
+  <script>
+    const button = document.getElementById("toggle");
+    const status = document.getElementById("status");
+    const canvas = document.getElementById("visualizer");
+    const context = canvas.getContext("2d");
+    let startLabel = "Start recording", stopLabel = "Stop recording";
+    let recorder, stream, audioContext, analyser, animation, chunks = [], captureId = 0;
+
+    function post(type, data = {}) {
+      window.parent.postMessage({ isStreamlitMessage: true, type, ...data }, "*");
+    }
+    function resize() {
+      const ratio = window.devicePixelRatio || 1;
+      const box = canvas.getBoundingClientRect();
+      canvas.width = Math.max(1, box.width * ratio);
+      canvas.height = Math.max(1, box.height * ratio);
+      context.setTransform(ratio, 0, 0, ratio, 0, 0);
+    }
+    function draw() {
+      const width = canvas.clientWidth, height = canvas.clientHeight;
+      context.clearRect(0, 0, width, height);
+      context.lineWidth = 2;
+      context.lineCap = "round";
+      context.strokeStyle = "#1b8b58";
+      if (analyser) {
+        const samples = new Uint8Array(analyser.fftSize);
+        analyser.getByteTimeDomainData(samples);
+        context.beginPath();
+        for (let i = 0; i < samples.length; i++) {
+          const x = i * width / samples.length;
+          const y = (samples[i] / 255) * height;
+          if (i === 0) context.moveTo(x, y); else context.lineTo(x, y);
+        }
+        context.stroke();
+        animation = requestAnimationFrame(draw);
+      } else {
+        context.strokeStyle = "#9bb9a5";
+        context.beginPath(); context.moveTo(8, height / 2); context.lineTo(width - 8, height / 2); context.stroke();
+      }
+    }
+    async function start() {
+      try {
+        stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+        const preferred = ["audio/webm;codecs=opus", "audio/webm", "audio/mp4"].find(type => MediaRecorder.isTypeSupported(type));
+        recorder = preferred ? new MediaRecorder(stream, { mimeType: preferred }) : new MediaRecorder(stream);
+        chunks = [];
+        recorder.ondataavailable = event => { if (event.data.size) chunks.push(event.data); };
+        recorder.onstop = async () => {
+          const blob = new Blob(chunks, { type: recorder.mimeType || "audio/webm" });
+          const reader = new FileReader();
+          reader.onloadend = () => {
+            const encoded = String(reader.result).split(",")[1] || "";
+            captureId += 1;
+            post("streamlit:setComponentValue", { dataType: "json", value: { id: captureId, audio_base64: encoded, mime_type: blob.type } });
+          };
+          reader.readAsDataURL(blob);
+          stream.getTracks().forEach(track => track.stop());
+          if (audioContext) await audioContext.close();
+          audioContext = null; analyser = null;
+          cancelAnimationFrame(animation); draw();
+          button.textContent = startLabel; status.textContent = "Recording ready"; status.className = "status";
+        };
+        audioContext = new AudioContext();
+        analyser = audioContext.createAnalyser(); analyser.fftSize = 1024;
+        audioContext.createMediaStreamSource(stream).connect(analyser);
+        recorder.start();
+        button.textContent = stopLabel; status.textContent = "Recording…"; status.className = "status live";
+        cancelAnimationFrame(animation); draw();
+      } catch (error) {
+        status.textContent = error.name === "NotAllowedError" ? "Microphone access denied" : "Microphone unavailable";
+        status.className = "status";
+      }
+    }
+    button.addEventListener("click", () => {
+      if (recorder && recorder.state === "recording") recorder.stop(); else start();
+    });
+    window.addEventListener("resize", () => { resize(); draw(); });
+    window.addEventListener("message", event => {
+      if (!event.data || event.data.type !== "streamlit:render") return;
+      const args = event.data.args || {};
+      startLabel = args.start_label || startLabel;
+      stopLabel = args.stop_label || stopLabel;
+      if (!recorder || recorder.state !== "recording") button.textContent = startLabel;
+    });
+    resize(); draw();
+    post("streamlit:componentReady", { apiVersion: 1 });
+    post("streamlit:setFrameHeight", { height: 78 });
+  </script>
+</body>
+</html>

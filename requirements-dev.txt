@@ -1,0 +1,4 @@
+-r requirements.txt
+pytest>=8.0,<9.0
+# Needed only by scripts/import_hf_dataset.py to read parquet datasets.
+pyarrow>=15.0
